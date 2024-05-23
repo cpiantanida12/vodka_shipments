@@ -1,0 +1,515 @@
+---
+title: "ADSP 31006 Final Project"
+author: "Rishab Mohan"
+date: "5/14/2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readxl)
+library(tseries)
+library(ggplot2)
+library(DataCombine)
+library(xts)
+library(zoo)
+library(forecast)
+library(stats)
+library(fracdiff)
+library(car)
+library(MASS)
+library(boot)
+library(dplyr)
+library(imputeTS)
+library(TSA)
+library(fGarch)
+```
+
+Data: The datasets we are working with are weekly vodka (of a specific, but unnamed brand) quantities shipped to the distributor (anonymous for legal reasons) and consumed (purchased by licensed vendors, stores, supermarkets, etc. from the distributor). The shipment dataset includes data starting in the week ending on 01/10/2015 and extending through to week ending 05/11/2024. The consumption dataset starts with the week ending on 01/13/2018 and has data upto the week ending on 04/20/2024. There is obviously a discrepancy here, meaning only overlapping weeks can be used if we want to predict one based on the other. The two variables about alcohol quantities are both in units of 9L (industry standard). 
+
+Problem Statement: We are working for our client, this alcohol distributor, to develop a forecasting algorithm for quantity of shipments of this particular brand of vodka. This will help them better order inventory according to when it is most needed, based on consumption, seasonality and other factors, thereby helping them maximize profit, as well as lower the unnecessary costs of ordering more inventory than is needed (vodka does not "go bad", and thus past inventory is till useable in future periods). 
+
+Potential Hypothesis 1: There is a lag between consumption changes and the corresponding change in shipments; this could be anywhere from 1 to 7 or 8 periods before this change takes course, as it takes time for the distributor to adjust inventory orders based on demand. 
+
+Potential Hypothesis 2: There was a drop in shipments during the COVID-19 pandemic, due to the closure of factories, as well as the closure of the hospitality sector (restaurants, bars), and social distancing guidelines preventing people from meeting to consume drinks together. 
+
+Potential Hypothesis 3: Due to warmer (more conducive to going out, gathering, etc.) weather in summer months, I expect demand, hence consumption and thus shipments to spike each summer, and conversely hit troughs in the winter months.
+
+Data Cleaning Steps: Firstly, I had to convert the date variables to date format. This, in the case of the consumption data, meant I had to first remove a string at the beginning of every data point. I then had to ensure no N/A values existed (none in either dataset). Finally, I created a combined dataset by performing an inner join on the date column. In terms of transforming variables, I multiplied both the shipping and consumption data by 9, so that they were in liters. This means that the data is easier to interpret going forward.
+
+```{r}
+alc <- readxl::read_xlsx("Time Series Data.xlsx")
+```
+
+```{r}
+alc2 <- read_xlsx("TS Consumption .xlsx")
+```
+
+```{r}
+alc2$period_description_short <- sub("^.*?\\s(\\d{1,2}/\\d{2}/\\d{2})$", "\\1", alc2$period_description_short)
+```
+
+```{r}
+alc$`End of Week` <- as.Date(alc$`End of Week`)
+```
+
+```{r}
+alc2$period_description_short <- as.Date(alc2$period_description_short, format = "%m/%d/%y")
+```
+
+```{r}
+alc2$period_description_short <- alc2$period_description_short[order(alc2$period_description_short)]
+```
+
+```{r}
+alc$shipping_liters <- 9*alc$`9L Total`
+alc2$consumption_liters <- 9*alc2$`9L Data`
+```
+
+```{r}
+alc_xts <- xts(x = alc$shipping_liters, order.by = alc$`End of Week`)
+plot(alc_xts)
+```
+
+```{r}
+alc2_xts <- xts(x = alc2$consumption_liters, order.by = alc2$period_description_short)
+plot(alc2_xts)
+```
+
+EDA: Looking at the time series plots of both the consumption and shipping data, both series appear stationary at a glance. 
+
+```{r}
+adf.test(alc_xts)
+kpss.test(alc_xts)
+```
+
+The significant Dickey Fuller test means we can reject the null hypothesis which states that the series is explosive for the shipping data. Similaryly, the insignificant KPSS test p value means we fail to reject the null which states the series is stationary. 
+
+```{r}
+adf.test(alc2_xts)
+kpss.test(alc2_xts)
+```
+
+The significant Dickey Fuller test means we can reject the null hypothesis which states that the series is explosive for the consumption data. Similaryly, the insignificant KPSS test p value means we fail to reject the null which states the series is stationary. 
+
+```{r}
+acf(alc_xts)
+```
+
+```{r}
+acf(alc2_xts)
+```
+
+Very minimal significant autocorrelation of lags for both series. This indicates that an ARFIMA model would not be well suited to this data. 
+
+```{r}
+res <- alc$shipping_liters - mean(alc$shipping_liters)
+```
+
+```{r}
+mean(res)
+var(res)
+```
+
+```{r}
+plot(res)
+```
+
+```{r}
+hist(res)
+```
+
+```{r}
+combined_data <- merge(alc, alc2, by.x = "End of Week", by.y="period_description_short")
+```
+
+```{r}
+train <- combined_data[combined_data$`End of Week` <= as.Date("2023-12-31"), ]
+test <- combined_data[combined_data$`End of Week` >= as.Date("2024-01-01"), ]
+```
+
+```{r}
+reg1 <- lm(shipping_liters ~consumption_liters, data=train)
+summary(reg1)
+```
+
+```{r}
+residuals <- reg1$residuals
+```
+
+```{r}
+acf(residuals)
+pacf(residuals)
+```
+
+```{r}
+checkresiduals(reg1)
+```
+
+```{r}
+cor(combined_data$shipping_liters, combined_data$consumption_liters)
+```
+
+```{r}
+pred1 <- predict(reg1, test)
+pred1
+```
+
+```{r}
+accuracy(pred1, test$shipping_liters)
+```
+
+```{r}
+reg2 <- lm(log(shipping_liters)~log(consumption_liters), data=combined_data)
+summary(reg2)
+```
+
+```{r}
+reg_arima <- auto.arima(train$shipping_liters, xreg=train$consumption_liters)
+summary(reg_arima)
+```
+
+```{r}
+pred_reg_arima <- forecast(reg_arima, xreg = test$shipping_liters)
+pred_reg_arima$mean
+```
+
+```{r}
+accuracy(pred_reg_arima$mean, test$shipping_liters)
+```
+
+```{r}
+acf(reg_arima$residuals)
+```
+
+```{r}
+train_xts <- xts(x = train$shipping_liters, order.by = train$`End of Week`)
+test_xts <- xts(x = test$shipping_liters, order.by = test$`End of Week`)
+```
+
+```{r}
+plot(train_xts)
+plot(test_xts)
+```
+
+```{r}
+mod3 <- auto.arima(train_xts)
+mod3
+```
+
+```{r}
+pred_arima <- forecast(mod3, h = nrow(test_xts))
+pred_arima$mean
+```
+
+```{r}
+accuracy(pred_arima$mean, test_xts)
+```
+
+```{r}
+acf(mod3$residuals)
+```
+
+```{r}
+train_lag <- train %>%
+  mutate(lagged_variable = lag(train$shipping_liters, 1))
+```
+
+```{r}
+cor(train_lag$consumption_liters, train_lag$lagged_variable, use = "complete.obs")
+```
+
+```{r}
+train_lag <- train %>%
+  mutate(lagged_variable = lag(train$shipping_liters, 2))
+cor(train_lag$consumption_liters, train_lag$lagged_variable, use = "complete.obs")
+```
+
+```{r}
+train_lag <- train %>%
+  mutate(lagged_variable = lag(train$shipping_liters, 3))
+cor(train_lag$consumption_liters, train_lag$lagged_variable, use = "complete.obs")
+```
+
+```{r}
+train_lag <- train %>%
+  mutate(lagged_variable = lag(train$shipping_liters, 4))
+cor(train_lag$consumption_liters, train_lag$lagged_variable, use = "complete.obs")
+```
+
+```{r}
+train_lag <- train %>%
+  mutate(lagged_variable = lag(train$shipping_liters, 5))
+cor(train_lag$consumption_liters, train_lag$lagged_variable, use = "complete.obs")
+```
+
+```{r}
+train_lag <- train %>%
+  mutate(lagged_variable = lag(train$shipping_liters, 6))
+cor(train_lag$consumption_liters, train_lag$lagged_variable, use = "complete.obs")
+```
+
+```{r}
+train_lag <- train %>%
+  mutate(lagged_variable = lag(train$shipping_liters, 7))
+cor(train_lag$consumption_liters, train_lag$lagged_variable, use = "complete.obs")
+```
+
+```{r}
+train_lag <- train %>%
+  mutate(lagged_variable = lag(train$shipping_liters, 8))
+cor(train_lag$consumption_liters, train_lag$lagged_variable, use = "complete.obs")
+```
+
+```{r}
+train_lag <- train %>%
+  mutate(lagged_variable = lag(train$shipping_liters, 9))
+cor(train_lag$consumption_liters, train_lag$lagged_variable, use = "complete.obs")
+```
+
+```{r}
+train_lag <- train %>%
+  mutate(lagged_variable = lag(train$shipping_liters, 10))
+cor(train_lag$consumption_liters, train_lag$lagged_variable, use = "complete.obs")
+```
+
+```{r}
+train_lag <- train %>%
+  mutate(lagged_variable = lag(train$shipping_liters, 11))
+cor(train_lag$consumption_liters, train_lag$lagged_variable, use = "complete.obs")
+```
+
+```{r}
+train_lag <- train %>%
+  mutate(lagged_variable = lag(train$shipping_liters, 12))
+cor(train_lag$consumption_liters, train_lag$lagged_variable, use = "complete.obs")
+```
+
+```{r}
+train_lag <- train %>%
+  mutate(lagged_variable = lag(train$shipping_liters, 13))
+cor(train_lag$consumption_liters, train_lag$lagged_variable, use = "complete.obs")
+```
+
+```{r}
+train_lag <- train %>%
+  mutate(lagged_variable = lag(train$shipping_liters, 14))
+cor(train_lag$consumption_liters, train_lag$lagged_variable, use = "complete.obs")
+```
+
+```{r}
+train_lag <- train %>%
+  mutate(lagged_variable = lag(train$shipping_liters, 15))
+cor(train_lag$consumption_liters, train_lag$lagged_variable, use = "complete.obs")
+```
+
+```{r}
+train_lag <- train %>%
+  mutate(lagged_variable = lag(train$shipping_liters, 16))
+cor(train_lag$consumption_liters, train_lag$lagged_variable, use = "complete.obs")
+```
+
+```{r}
+train_lag <- train %>%
+  mutate(lagged_variable = lag(train$shipping_liters, 17))
+cor(train_lag$consumption_liters, train_lag$lagged_variable, use = "complete.obs")
+```
+
+```{r}
+train_lag <- train %>%
+  mutate(lagged_variable = lag(train$shipping_liters, 18))
+cor(train_lag$consumption_liters, train_lag$lagged_variable, use = "complete.obs")
+```
+
+```{r}
+train_lag <- train %>%
+  mutate(lagged_variable = lag(train$shipping_liters, 19))
+cor(train_lag$consumption_liters, train_lag$lagged_variable, use = "complete.obs")
+```
+
+```{r}
+train_lag <- train %>%
+  mutate(lagged_variable = lag(train$shipping_liters, 20))
+cor(train_lag$consumption_liters, train_lag$lagged_variable, use = "complete.obs")
+```
+
+Variables not correlated upto 30th lag; linear regression model not suitable. 
+
+I will try fitting ARIMA, SARIMA and ARFIMA models using the full 2015-2023 shipping dataset as the training data. 
+
+```{r}
+ship_train <- alc[alc$`End of Week` <= as.Date("2023-12-31"), ]
+ship_test <- alc[alc$`End of Week` >= as.Date("2024-01-01"), ] 
+```
+
+```{r}
+train2_xts <- xts(x = ship_train$shipping_liters, order.by = ship_train$`End of Week`)
+test2_xts <- xts(x = ship_test$shipping_liters, order.by = ship_test$`End of Week`)
+```
+
+```{r}
+mod4 <- auto.arima(train2_xts)
+mod4
+```
+
+
+```{r}
+pred_arima2 <- forecast(mod4, h = nrow(test2_xts))
+pred_arima2$mean
+```
+
+```{r}
+accuracy(pred_arima2$mean, test2_xts)
+```
+
+```{r}
+mod5 <- Arima(train2_xts, order=c(0,3,3), seasonal = FALSE)
+mod5
+```
+
+```{r}
+pred_arima3 <- forecast(mod5, h = nrow(test2_xts))
+pred_arima3$mean
+accuracy(pred_arima3$mean, test2_xts)
+```
+
+```{r}
+ship_train_ts <- ts(ship_train$shipping_liters, frequency = 52)
+hw_ship <- HoltWinters(ship_train_ts)
+hw_ship
+```
+
+```{r}
+predictions_hw_ship <- forecast(hw_ship, h = nrow(test2_xts))
+predictions_hw_ship$mean
+```
+
+```{r}
+accuracy(predictions_hw_ship$mean, test2_xts)
+```
+
+```{r}
+ship_train_ts <- ts(ship_train$shipping_liters, frequency = 12)
+sarima_ship <- auto.arima(ship_train_ts, seasonal =TRUE)
+summary(sarima_ship)
+```
+
+```{r}
+predictions_sarima_ship <- forecast(sarima_ship, h = nrow(test2_xts))
+predictions_sarima_ship$mean
+```
+
+```{r}
+accuracy(predictions_sarima_ship$mean, test2_xts)
+```
+
+```{r}
+ship_train_ts <- ts(ship_train$shipping_liters, frequency = 12*6)
+sarima_ship <- auto.arima(ship_train_ts, seasonal =TRUE)
+summary(sarima_ship)
+```
+
+```{r}
+predictions_sarima_ship <- forecast(sarima_ship, h = nrow(test2_xts))
+predictions_sarima_ship$mean
+```
+
+```{r}
+accuracy(predictions_sarima_ship$mean, test2_xts)
+```
+
+```{r}
+ship_train_ts <- ts(ship_train$shipping_liters, frequency = 12)
+hw_ship <- HoltWinters(ship_train_ts)
+hw_ship
+```
+
+```{r}
+predictions_hw_ship <- forecast(hw_ship, h = nrow(test2_xts))
+predictions_hw_ship$mean
+```
+
+```{r}
+accuracy(predictions_hw_ship$mean, test2_xts)
+```
+
+```{r}
+ship_train_ts <- ts(ship_train$shipping_liters, frequency = 9*12)
+hw_ship <- HoltWinters(ship_train_ts)
+summary(hw_ship)
+```
+
+```{r}
+predictions_hw_ship <- forecast(hw_ship, h = nrow(test2_xts))
+predictions_hw_ship$mean
+```
+
+```{r}
+accuracy(predictions_hw_ship$mean, test2_xts)
+```
+
+```{r}
+msts <- msts(ship_train_ts, seasonal.periods=c(12, 9, 469))
+plot(msts)
+model <- tbats(msts)
+comp <- tbats.components(model)
+plot(comp)
+plot(forecast(model, h=19))
+```
+```{r}
+predictions_tbats_ship <- forecast(model, h = nrow(test2_xts))
+predictions_tbats_ship$mean
+```
+
+```{r}
+accuracy(predictions_tbats_ship$mean, test2_xts)
+```
+
+```{r}
+hw_ts <- ts(predictions_hw_ship$mean, start=start(test2_xts), frequency=frequency(test2_xts))
+sarima_ts <- ts(predictions_sarima_ship$mean, start=start(test2_xts), frequency=frequency(test2_xts))
+
+# Merge forecasts
+combined_forecast <- merge(hw_ts, sarima_ts, all=TRUE)  # Use common time points only
+
+# Average the forecasts
+combined_hw_arima <- rowMeans(combined_forecast)
+accuracy(combined_hw_arima, test2_xts)
+```
+
+```{r}
+hw_ts <- ts(predictions_hw_ship$mean, start=start(test2_xts), frequency=frequency(test2_xts))
+tbats_ts <- ts(predictions_tbats_ship$mean, start=start(test2_xts), frequency=frequency(test2_xts))
+
+# Merge forecasts
+combined_forecast <- merge(hw_ts, tbats_ts, all=TRUE)  # Use common time points only
+
+# Average the forecasts
+combined_hw_arima <- rowMeans(combined_forecast)
+accuracy(combined_hw_arima, test2_xts)
+```
+
+```{r}
+library(CausalImpact)
+start = as.Date("2015-01-10")
+end = as.Date("2023-12-31")
+pre.cov <- c(start, as.Date("2020-02-29")) 
+cov <- c(as.Date("2020-03-01"), as.Date("2021-03-01"))
+post.cov <- c(as.Date("2021-03-01"), end)
+impact_cov <- CausalImpact(train2_xts, pre.cov, cov, model.args = list(niter = 1000, nseasons = 12))
+impact_cov
+```
+
+```{r}
+plot(impact_cov)
+```
+
+```{r}
+impact_after_cov <- CausalImpact(train2_xts, cov, post.cov, model.args = list(niter = 1000, nseasons = 12))
+impact_after_cov
+```
+
+```{r}
+plot(impact_after_cov)
+```
+

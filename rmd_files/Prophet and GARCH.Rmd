@@ -1,0 +1,397 @@
+---
+title: "Piantanida_Final"
+author: "Christian Piantanida"
+date: "2024-05-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+```{r}
+library(readxl)
+library(tseries)
+library(ggplot2)
+library(DataCombine)
+library(xts)
+library(zoo)
+library(forecast)
+library(stats)
+library(fracdiff)
+library(car)
+library(MASS)
+library(boot)
+library(dplyr)
+library(imputeTS)
+library(TSA)
+library(lubridate)
+library(prophet)
+library(bsts)
+library(Metrics)
+```
+
+```{r}
+alc <- read.csv("shipments.csv")
+alc2 <- read.csv("consumption.csv")
+```
+
+```{r}
+alc$date <- mdy(alc$End.of.Week)
+alc$shipping_liters <- as.numeric(gsub(",", "", alc$X9L.Total))
+alc$shipping_liters <- 9*alc$shipping_liters
+
+alc_zoo <- zoo(alc$shipping_liters, order.by = alc$date)
+
+train <- window(alc_zoo, end = as.Date("2023-12-31"))
+test <- window(alc_zoo, start = as.Date("2024-01-01"))
+
+train <- as.xts(train)
+test <- as.xts(test)
+```
+
+
+```{r}
+plot(train)
+```
+
+```{r}
+adf_result <- adf.test(train)
+
+kpss_result <- kpss.test(train)
+
+adf_stationarity <- ifelse(adf_result$p.value < 0.05, "Stationary", "Non-stationary")
+kpss_stationarity <- ifelse(kpss_result$p.value < 0.05, "Non-stationary", "Stationary")
+
+cat("\n")
+cat("ADF Test Result:\n")
+cat("P-value:", adf_result$p.value, "\n")
+cat("Stationarity:", adf_stationarity, "\n")
+cat("KPSS Test Result:\n")
+cat("P-value:", kpss_result$p.value, "\n")
+cat("Stationarity:", kpss_stationarity, "\n")
+cat("\n")
+```
+
+```{r}
+acf_values <- acf(train, main = "Series train", xaxt = "n")
+
+# Add a customized x-axis with more granular tick marks
+# For example, add tick marks every 5 lags
+axis(1, at = seq(0, 200, by = 5), labels = seq(0, 200, by = 5))
+```
+
+
+```{r}
+pacf(train)
+```
+
+
+```{r}
+order <- 1:5  # Try different orders
+models <- lapply(order, function(p) arima(train, order = c(p, 0, 0)))
+
+# Extract AIC, BIC, or HQIC values
+aic <- sapply(models, AIC)
+bic <- sapply(models, BIC)
+hqic <- sapply(models, function(model) AIC(model, k = log(length(train))))
+
+# Find the order with the lowest information criterion
+best_order_aic <- order[which.min(aic)]
+best_order_bic <- order[which.min(bic)]
+best_order_hqic <- order[which.min(hqic)]
+
+print(paste("Best order (AIC):", best_order_aic))
+print(paste("Best order (BIC):", best_order_bic))
+print(paste("Best order (HQIC):", best_order_hqic))
+```
+
+```{r}
+# Fit MA models with different orders
+order <- 1:5  # Try different orders
+models <- lapply(order, function(q) arima(train, order = c(0, 0, q)))
+
+# Extract AIC, BIC, or HQIC values
+aic <- sapply(models, AIC)
+bic <- sapply(models, BIC)
+hqic <- sapply(models, function(model) AIC(model, k = log(length(train))))
+
+# Find the order with the lowest information criterion
+best_order_aic <- order[which.min(aic)]
+best_order_bic <- order[which.min(bic)]
+best_order_hqic <- order[which.min(hqic)]
+
+print(paste("Best order (AIC):", best_order_aic))
+print(paste("Best order (BIC):", best_order_bic))
+print(paste("Best order (HQIC):", best_order_hqic))
+
+```
+
+### ARMA (1,1) Model
+```{r}
+# Fit the ARMA(1,1) model on the training data
+arma_model <- arima(train, order = c(1, 0, 1))
+
+# Forecast the same length as the test dataset
+n_test <- length(test)
+forecasts <- predict(arma_model, n.ahead = n_test)
+
+# Extract the forecasted values
+forecasted_values <- forecasts$pred
+
+# Compare forecasted values with the actual test data
+actual_values <- coredata(test)  # Convert xts object to a numeric vector
+
+# Calculate performance metrics
+mse <- mean((forecasted_values - actual_values)^2)
+mae <- mean(abs(forecasted_values - actual_values))
+
+# Print performance metrics
+cat("Mean Squared Error (MSE):", mse, "\n")
+cat("Mean Absolute Error (MAE):", mae, "\n")
+
+# Plot actual vs. forecasted values
+plot(index(test), actual_values, type = "l", col = "blue", ylab = "Values", xlab = "Time", main = "Actual vs Forecasted Values")
+lines(index(test), forecasted_values, col = "red")
+legend("topleft", legend = c("Actual", "Forecasted"), col = c("blue", "red"), lty = 1)
+
+```
+
+### Simple Auto Arima
+```{r}
+auto_arima_model <- auto.arima(train)
+
+# Display the model summary
+summary(auto_arima_model)
+```
+
+```{r}
+n_test <- length(test)
+forecasts <- predict(auto_arima_model, n.ahead = n_test)
+
+# Extract the forecasted values
+forecasted_values <- forecasts$pred
+
+# Compare forecasted values with the actual test data
+actual_values <- coredata(test)  # Convert xts object to a numeric vector
+
+# Calculate performance metrics
+mse <- mean((forecasted_values - actual_values)^2)
+mae <- mean(abs(forecasted_values - actual_values))
+
+# Print performance metrics
+cat("Mean Squared Error (MSE):", mse, "\n")
+cat("Mean Absolute Error (MAE):", mae, "\n")
+
+# Plot actual vs. forecasted values
+plot(index(test), actual_values, type = "l", col = "blue", ylab = "Values", xlab = "Time", main = "Actual vs Forecasted Values")
+lines(index(test), forecasted_values, col = "red")
+legend("topleft", legend = c("Actual", "Forecasted"), col = c("blue", "red"), lty = 1)
+```
+
+### Prophet
+```{r}
+train_df <- data.frame(ds = index(train), y = coredata(train))
+test_df <- data.frame(ds = index(test), y = coredata(test))
+
+model <- prophet(
+  yearly.seasonality = TRUE,
+  weekly.seasonality = FALSE,
+  daily.seasonality = FALSE,
+  changepoint.prior.scale = 0.01,
+  seasonality.mode = 'additive',
+  interval.width = 0.95
+)
+
+prophet_model <- fit.prophet(model, train_df)
+
+future_dates <- make_future_dataframe(prophet_model, periods = nrow(test_df))
+
+forecast <- predict(prophet_model, future_dates)
+
+```
+
+```{r}
+# Extract actual values for the test period
+actual_values <- test_df$y
+
+# Extract predicted values for the test period
+predicted_values <- forecast$yhat[-(1:nrow(train_df))]
+
+# Calculate MAE
+mae <- mean(abs(actual_values - predicted_values))
+cat("Mean Absolute Error (MAE):", mae, "\n")
+
+# Calculate MSE
+mse <- mean((actual_values - predicted_values)^2)
+cat("Mean Squared Error (MSE):", mse, "\n")
+
+rmse <- sqrt(mse)
+cat("Root Mean Squared Error (RMSE):", rmse, "\n")
+
+mpe <- mean((actual_values - predicted_values) / actual_values) * 100
+cat("Mean Percentage Error (MPE):", mpe, "\n")
+
+# Calculate MAPE
+mape <- mean(abs((actual_values - predicted_values) / actual_values)) * 100
+cat("Mean Absolute Percentage Error (MAPE):", mape, "\n")
+
+plot(test_df$ds, actual_values, type = "l", col = "red", 
+     main = "Actual vs. Forecasted Values", xlab = "Date", ylab = "Values (Liters)")
+
+# Add the predicted values as a blue line
+lines(test_df$ds, predicted_values, col = "blue", lty = 1)
+
+# Add a legend
+legend("topleft", legend = c("Actual Values", "Forecasted Values"), 
+       col = c("red", "blue"), lty = c(1, 1))
+```
+
+```{r}
+actual_train_values <- train_df$y
+actual_test_values <- test_df$y
+
+# Extract predicted values for the train and test periods
+predicted_train_values <- forecast$yhat[1:nrow(train_df)]
+predicted_test_values <- forecast$yhat[-(1:nrow(train_df))]
+
+# Combine the actual and predicted values
+combined_actual_values <- c(actual_train_values, actual_test_values)
+combined_predicted_values <- forecast$yhat
+
+# Combine the dates from train and test datasets
+combined_dates <- c(train_df$ds, test_df$ds)
+
+# Calculate MAE
+mae <- mean(abs(combined_actual_values - combined_predicted_values))
+cat("Mean Absolute Error (MAE):", mae, "\n")
+
+# Calculate MSE
+mse <- mean((combined_actual_values - combined_predicted_values)^2)
+cat("Mean Squared Error (MSE):", mse, "\n")
+
+rmse <- sqrt(mse)
+cat("Root Mean Squared Error (RMSE):", rmse, "\n")
+
+mpe <- mean((combined_actual_values - combined_predicted_values) / combined_actual_values) * 100
+cat("Mean Percentage Error (MPE):", mpe, "\n")
+
+# Calculate MAPE
+mape <- mean(abs((combined_actual_values - combined_predicted_values) / combined_actual_values)) * 100
+cat("Mean Absolute Percentage Error (MAPE):", mape, "\n")
+
+plot(combined_dates, combined_actual_values, type = "l", col = "red", 
+     main = "Actual vs. Predicted Values", xlab = "Date", ylab = "Values")
+
+# Add the predicted values as a blue line
+lines(combined_dates, combined_predicted_values, col = "blue", lty = 2)
+
+# Add a legend
+legend("topleft", legend = c("Actual Values", "Predicted Values"), 
+       col = c("red", "blue"), lty = c(1, 2))
+```
+
+```{r}
+# Calculate residuals for both train and test periods
+residuals_train <- actual_train_values - predicted_train_values
+residuals_test <- actual_test_values - predicted_test_values
+
+# Combine residuals
+combined_residuals <- c(residuals_train, residuals_test)
+
+# Plot the residuals
+plot(combined_dates, combined_residuals, type = "l", col = "blue",
+     main = "Residuals of the Model", xlab = "Date", ylab = "Residuals")
+
+# Add a horizontal line at zero for reference
+abline(h = 0, col = "red", lty = 2)
+```
+
+```{r}
+# Specify the state space components
+state_specification <- list()
+state_specification <- AddLocalLevel(state_specification, train)
+
+# Add seasonal component for monthly seasonality (approx. 4 weeks)
+state_specification <- AddSeasonal(state_specification, train, nseasons = 4)
+
+state_specification <- AddAr(state_specification, lags = 4, sdy = sd(train))
+
+
+# Fit the BSTS model
+bsts_model <- bsts(train, state.specification = state_specification, niter = 1000)
+
+# Predict using the fitted BSTS model
+forecast_horizon <- nrow(test_df)
+pred <- predict(bsts_model, horizon = forecast_horizon, burn = 100)
+
+# Extract the predicted means
+predicted_values <- pred$mean
+
+# Extract the actual values from the test dataset
+actual_values <- test_df$y
+
+# Calculate Mean Percentage Error (MPE)
+mpe <- mean((actual_values - predicted_values) / actual_values) * 100
+cat("Mean Percentage Error (MPE):", mpe, "\n")
+
+# If you prefer the absolute version:
+# Calculate Mean Absolute Percentage Error (MAPE)
+mape <- mean(abs((actual_values - predicted_values) / actual_values)) * 100
+cat("Mean Absolute Percentage Error (MAPE):", mape, "\n")
+```
+
+```{r}
+# Calculate returns (assuming data is log-transformed or stationary)
+returns <- diff(log(train))
+
+# Plot the squared returns
+squared_returns <- returns^2
+plot(squared_returns, main="Squared Returns Plot", ylab="Squared Returns", xlab="Time", type="l")
+
+```
+
+```{r}
+# Ljung-Box test on squared returns
+Box.test(squared_returns, lag=10, type="Ljung-Box")
+
+```
+
+
+```{r}
+library(rugarch)
+
+# Specify a GARCH(1,1) model
+spec <- ugarchspec(variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
+                   mean.model = list(armaOrder = c(4, 3), include.mean = TRUE),
+                   distribution.model = "std")
+
+# Fit the model
+fit <- ugarchfit(spec, data = train)
+
+# Forecast
+forecast <- ugarchforecast(fit, n.ahead = nrow(test))
+
+```
+
+```{r}
+plot(fit)
+```
+
+```{r}
+residuals <- residuals(fit, standardize = TRUE)
+Box.test(residuals, lag = 10, type = "Ljung-Box")
+Box.test(residuals^2, lag = 10, type = "Ljung-Box")
+```
+
+```{r}
+forecasted_values <- as.numeric(fitted(forecast))
+
+rmse_test <- rmse(test, forecasted_values)
+mape_test <- mape(test, forecasted_values)
+
+cat("Test RMSE:", rmse_test, "\n")
+cat("Test MAPE:", mape_test, "\n")
+```
+

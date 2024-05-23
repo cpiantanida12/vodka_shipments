@@ -1,0 +1,492 @@
+---
+title: "Final Project"
+author: "Kaustubh Patil"
+date: "2024-05-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+[Installing packages]{.underline}
+
+```{r}
+# install.packages("readxl")
+# install.packages("tseries")
+# install.packages("ggplot2")
+# install.packages("DataCombine")
+# install.packages("xts")
+# install.packages("zoo")
+# install.packages("forecast")
+# install.packages("stats")
+# install.packages("fracdiff")
+# install.packages("car")
+# install.packages("MASS")
+# install.packages("boot")
+# install.packages("dplyr")
+# install.packages("imputeTS")
+# install.packages("TSA")
+```
+
+[Loading libraries]{.underline}
+
+```{r}
+library(readxl)
+library(tseries)
+library(ggplot2)
+library(DataCombine)
+library(xts)
+library(zoo)
+library(forecast)
+library(stats)
+library(fracdiff)
+library(car)
+library(MASS)
+library(boot)
+library(dplyr)
+library(imputeTS)
+library(TSA)
+```
+
+[Loading data]{.underline}
+
+```{r}
+vodka_shipments <- readxl::read_xlsx("C:/Users/khpat/Dropbox/ADSP 31006 Time Series Analysis & Forecasting/Final Project/Time Series Data.xlsx")
+```
+
+```{r}
+vodka_consumption <- readxl::read_xlsx("C:/Users/khpat/Dropbox/ADSP 31006 Time Series Analysis & Forecasting/Final Project/TS Consumption.xlsx")
+```
+
+Extracting the date from the consumption data
+
+```{r}
+vodka_consumption$period_description_short <- sub("^.*?\\s(\\d{1,2}/\\d{2}/\\d{2})$", "\\1", vodka_consumption$period_description_short)
+```
+
+Converting the strings to date objects in shipment data
+
+```{r}
+vodka_shipments$`End of Week` <- as.Date(vodka_shipments$`End of Week`)
+```
+
+Formatting and converting the date strings to date
+
+```{r}
+vodka_consumption$period_description_short <- as.Date(vodka_consumption$period_description_short, format = "%m/%d/%y")
+```
+
+Ordering the dates
+
+```{r}
+vodka_consumption$period_description_short <- vodka_consumption$period_description_short[order(vodka_consumption$period_description_short)]
+```
+
+Calculating the liter quantities
+
+```{r}
+vodka_shipments$shipping_liters <- 9 * vodka_shipments$`9L Total`
+vodka_consumption$consumption_liters <- 9 * vodka_consumption$`9L Data`
+```
+
+[Creating and plotting the datasets as time series objects]{.underline}
+
+```{r}
+vodka_shipments_xts <- xts(x = vodka_shipments$shipping_liters, order.by = vodka_shipments$`End of Week`)
+plot(vodka_shipments_xts)
+```
+
+```{r}
+vodka_consumption_xts <- xts(x = vodka_consumption$consumption_liters, order.by = vodka_consumption$period_description_short)
+plot(vodka_consumption_xts)
+```
+
+[Plotting both time series]{.underline}
+
+```{r}
+# Merging the time series objects
+combined_xts <- merge(vodka_shipments_xts, vodka_consumption_xts, join = "inner")
+
+# Converting to data frame for ggplot
+combined_df <- fortify.zoo(combined_xts)
+names(combined_df) <- c("Date", "Shipments", "Consumption")
+
+# Plot using ggplot
+ggplot(data = combined_df, aes(x = Date)) +
+  geom_line(aes(y = Shipments, colour = "Shipments")) +
+  geom_line(aes(y = Consumption, colour = "Consumption")) +
+  labs(
+    title = "Vodka Shipments & Consumption Over Time",
+    x = "Date",
+    y = "Volume in Liters",
+    colour = "Legend"
+  ) +
+  theme_minimal()
+```
+
+Looking at the time series plots of both the consumption and shipping data, both series appear stationary at a glance.
+
+```{r}
+adf.test(vodka_shipments_xts)
+kpss.test(vodka_shipments_xts)
+```
+
+The significant Dickey Fuller test means we can reject the null hypothesis which states that the series is explosive for the shipping data. Similarly, the insignificant KPSS test p value means we fail to reject the null which states the series is stationary.
+
+```{r}
+adf.test(vodka_consumption_xts)
+kpss.test(vodka_consumption_xts)
+```
+
+The significant Dickey Fuller test means we can reject the null hypothesis which states that the series is explosive for the consumption data. Similarly, the insignificant KPSS test p value means we fail to reject the null which states the series is stationary.
+
+```{r}
+acf(vodka_shipments_xts)
+```
+
+```{r}
+acf(vodka_consumption_xts)
+```
+
+Very minimal significant autocorrelation of lags for both series. This indicates that an ARFIMA model would not be well suited to this data.
+
+Merging both datasets -
+
+```{r}
+combined_data <- merge(vodka_shipments, vodka_consumption, by.x = "End of Week", by.y = "period_description_short")
+```
+
+Splitting into training and testing data
+
+```{r}
+train <- combined_data[combined_data$`End of Week` <= as.Date("2023-12-31"), ]
+test <- combined_data[combined_data$`End of Week` >= as.Date("2024-01-01"), ]
+```
+
+```{r}
+train_xts <- xts(x = train$shipping_liters, order.by = train$`End of Week`)
+test_xts <- xts(x = test$shipping_liters, order.by = test$`End of Week`)
+```
+
+```{r}
+plot(train_xts)
+```
+
+```{r}
+plot(test_xts)
+```
+
+Testing the first hypothesis -
+
+```{r}
+# Generating lagged variables to explore time-delayed relationships
+for (i in 1:30) {
+  train_lag <- train %>%
+    mutate(lagged_variable = lag(train$shipping_liters, i))
+  print(paste("Lag", i, "correlation:", cor(train_lag$consumption_liters, train_lag$lagged_variable, use = "complete.obs")))
+}
+```
+
+The correlation coefficients for 30 lags range between 0.086 to 0.092, indicating weak linear relationships between past values of shipping and current values of consumption.
+
+From here on we are focusing on the shipping dataset.
+
+```{r}
+shipping_train <- vodka_shipments[vodka_shipments$`End of Week` <= as.Date("2023-12-31"), ]
+shipping_test <- vodka_shipments[vodka_shipments$`End of Week` >= as.Date("2024-01-01"), ]
+```
+
+```{r}
+shipping_train_xts <- xts(x = shipping_train$shipping_liters, order.by = shipping_train$`End of Week`)
+shipping_test_xts <- xts(x = shipping_test$shipping_liters, order.by = shipping_test$`End of Week`)
+```
+
+#### Holt Winters model for weekly data
+
+```{r}
+shipping_train_timeseries <- ts(shipping_train$shipping_liters, frequency = 52)
+```
+
+```{r}
+holtwinters_shipping <- HoltWinters(shipping_train_timeseries)
+holtwinters_shipping
+```
+
+```{r}
+predictions_holtwinters_shipping <- forecast(holtwinters_shipping, h = nrow(shipping_test_xts))
+predictions_holtwinters_shipping$mean
+```
+
+```{r}
+accuracy(predictions_holtwinters_shipping$mean, shipping_test_xts)
+```
+
+```{r}
+# Extract the time period for the forecast
+forecast_dates <- seq(start(shipping_test_xts)[1], length = length(predictions_holtwinters_shipping$mean), by = "week")
+
+# data frame to plot
+hw_forecast_df <- data.frame(
+  Date = forecast_dates,
+  Forecast = predictions_holtwinters_shipping$mean,
+  Actual = coredata(shipping_test_xts)
+)
+
+# Plotting
+ggplot(data = hw_forecast_df, aes(x = Date)) +
+  geom_line(aes(y = Actual, colour = "Actual"), size = 1.2) +
+  geom_line(aes(y = Forecast, colour = "Forecast"), linetype = "dashed", size = 1.2) +
+  labs(
+    title = "Holt-Winters Weekly Forecast vs Actual",
+    x = "Date",
+    y = "Shipping Volume"
+  ) +
+  scale_color_manual(values = c("Actual" = "blue", "Forecast" = "red")) +
+  theme_minimal()
+```
+
+#### Holt Winters model for adjusted seasonal data
+
+```{r}
+shipping_train_timeseries_2 <- ts(shipping_train$shipping_liters, frequency = 9 * 12)
+```
+
+```{r}
+holtwinters_shipping_2 <- HoltWinters(shipping_train_timeseries_2)
+holtwinters_shipping_2
+```
+
+```{r}
+predictions_holtwinters_shipping_2 <- forecast(holtwinters_shipping_2, h = nrow(shipping_test_xts))
+predictions_holtwinters_shipping_2$mean
+```
+
+```{r}
+accuracy(predictions_holtwinters_shipping_2$mean, shipping_test_xts)
+```
+
+```{r}
+adjusted_forecast_dates <- seq(start(shipping_test_xts)[1], length = length(predictions_holtwinters_shipping_2$mean), by = "week")
+
+# data frame to plot
+adjusted_hw_forecast_df <- data.frame(
+  Date = adjusted_forecast_dates,
+  Forecast = predictions_holtwinters_shipping_2$mean,
+  Actual = coredata(shipping_test_xts)
+)
+
+# Plotting
+ggplot(data = adjusted_hw_forecast_df, aes(x = Date)) +
+  geom_line(aes(y = Actual, colour = "Actual"), size = 1.2) +
+  geom_line(aes(y = Forecast, colour = "Forecast"), size = 1.2) +
+  labs(
+    title = "Adjusted Holt-Winters Forecast vs Actual",
+    x = "Date",
+    y = "Shipping Volume"
+  ) +
+  scale_color_manual(values = c("Actual" = "blue", "Forecast" = "red")) +
+  theme_minimal()
+```
+
+```{r}
+# Data frame for residuals
+adjusted_hw_forecast_df <- data.frame(
+  Date = index(shipping_test_xts),
+  Forecast = predictions_holtwinters_shipping_2$mean,
+  Actual = coredata(shipping_test_xts)
+)
+
+# Calculate residuals
+adjusted_hw_forecast_df$Residuals <- adjusted_hw_forecast_df$Actual - adjusted_hw_forecast_df$Forecast
+
+# Plotting residuals
+library(ggplot2)
+ggplot(data = adjusted_hw_forecast_df, aes(x = Date, y = Residuals)) +
+  geom_line(color = "blue") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Residuals of Adjusted Holt-Winters Forecast",
+    x = "Date",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+```
+
+#### Multi-seasonal Time Series Analysis
+
+```{r}
+multiseasonal_time_series <- msts(shipping_train_timeseries_2, seasonal.periods = c(12, 9, 469))
+plot(multiseasonal_time_series)
+```
+
+```{r}
+tbats_model <- tbats(multiseasonal_time_series)
+tbats_model
+```
+
+```{r}
+tbats_components <- tbats.components(tbats_model)
+plot(tbats_components)
+```
+
+```{r}
+plot(forecast(tbats_model, h = 19))
+```
+
+```{r}
+predictions_tbats_shipping <- forecast(tbats_model, h = nrow(shipping_test_xts))
+predictions_tbats_shipping$mean
+```
+
+```{r}
+accuracy(predictions_tbats_shipping$mean, shipping_test_xts)
+```
+
+```{r}
+# Data frame to plot
+tbats_forecast_df <- data.frame(
+  Date = index(shipping_test_xts),
+  Forecast = predictions_tbats_shipping$mean,
+  Actual = coredata(shipping_test_xts)
+)
+
+names(tbats_forecast_df)[names(tbats_forecast_df) == "x"] <- "Forecast"
+
+# Plotting
+ggplot(data = tbats_forecast_df, aes(x = Date)) +
+  geom_line(aes(y = Actual, colour = "Actual"), size = 1.2) +
+  geom_line(aes(y = Forecast, colour = "Forecast"), size = 1.2) +
+  labs(
+    title = "TBATS Forecast vs Actual",
+    x = "Date",
+    y = "Shipping Volume"
+  ) +
+  scale_color_manual(values = c("Actual" = "blue", "Forecast" = "red")) +
+  theme_minimal()
+```
+
+#### Combined Holt Winters + TBATS
+
+```{r}
+holtwinters_time_series <- ts(predictions_holtwinters_shipping_2$mean, start = start(shipping_test_xts), frequency = frequency(shipping_test_xts))
+tbats_time_series <- ts(predictions_tbats_shipping$mean, start = start(shipping_test_xts), frequency = frequency(shipping_test_xts))
+
+# Merge forecasts
+combined_forecast <- merge(holtwinters_time_series, tbats_time_series, all = TRUE)
+```
+
+```{r}
+# Data frame to plot
+combined_forecast_df <- data.frame(
+  Date = index(shipping_test_xts),
+  Forecast = coredata(combined_forecast),
+  Actual = coredata(shipping_test_xts)
+)
+
+names(combined_forecast_df)[names(combined_forecast_df) == "x"] <- "Forecast"
+
+# Plotting
+ggplot(data = combined_forecast_df, aes(x = Date)) +
+  geom_line(aes(y = Actual), colour = "blue", size = 1.2) +
+  geom_line(aes(y = Forecast), colour = "red", size = 1.2) +
+  labs(
+    title = "Combined Holt-Winters and TBATS Forecast vs Actual",
+    x = "Date",
+    y = "Shipping Volume"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# Calculating residuals
+combined_forecast_df <- data.frame(
+  Date = index(shipping_test_xts),
+  Forecast = coredata(combined_forecast),
+  Actual = coredata(shipping_test_xts)
+)
+
+names(combined_forecast_df)[names(combined_forecast_df) == "x"] <- "Forecast"
+
+combined_forecast_df$Residuals <- combined_forecast_df$Actual - combined_forecast_df$Forecast
+
+# Plotting residuals
+ggplot(data = combined_forecast_df, aes(x = Date, y = Residuals)) +
+  geom_line(color = "blue") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Residuals of Combined Holt-Winters and TBATS Forecast",
+    x = "Date",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+```
+
+#### Combined Holt Winters + SARIMA
+
+```{r}
+shipping_train_timeseries_3 <- ts(shipping_train$shipping_liters, frequency = 12)
+sarima_shipping <- auto.arima(shipping_train_timeseries_3, seasonal = TRUE)
+summary(sarima_shipping)
+```
+
+```{r}
+predictions_sarima_shipping <- forecast(sarima_shipping, h = nrow(shipping_test_xts))
+predictions_sarima_shipping$mean
+```
+
+```{r}
+holtwinters_time_series <- ts(predictions_holtwinters_shipping_2$mean, start = start(shipping_test_xts), frequency = frequency(shipping_test_xts))
+sarima_timeseries <- ts(predictions_sarima_shipping$mean, start = start(shipping_test_xts), frequency = frequency(shipping_test_xts))
+
+# Merge forecasts
+combined_forecast <- merge(holtwinters_time_series, sarima_timeseries, all = TRUE) # Use common time points only
+
+# Average the forecasts
+combined_hw_sarima <- rowMeans(combined_forecast)
+accuracy(combined_hw_sarima, shipping_test_xts)
+```
+
+```{r}
+# data frame to plot
+combined_sarima_df <- data.frame(
+  Date = index(shipping_test_xts),
+  Forecast_HW_SARIMA = combined_hw_sarima,
+  Actual = coredata(shipping_test_xts)
+)
+
+# Plotting
+ggplot(data = combined_sarima_df, aes(x = Date)) +
+  geom_line(aes(y = Actual, colour = "Actual"), size = 1.2) +
+  geom_line(aes(y = Forecast_HW_SARIMA, colour = "Forecast HW SARIMA"), size = 1.2) +
+  labs(title = "Combined Holt-Winters and SARIMA Forecast vs Actual",
+       x = "Date",
+       y = "Shipping Volume") +
+  scale_color_manual(values = c("Actual" = "blue", "Forecast HW SARIMA" = "red")) +
+  theme_minimal()
+
+```
+
+```{r}
+# Data frame for residuals
+combined_hw_sarima_df <- data.frame(
+  Date = index(shipping_test_xts),
+  Forecast = combined_hw_sarima,
+  Actual = coredata(shipping_test_xts)
+)
+
+# Calculate residuals
+combined_hw_sarima_df$Residuals <- combined_hw_sarima_df$Actual - combined_hw_sarima_df$Forecast
+
+# Plotting residuals
+library(ggplot2)
+ggplot(data = combined_hw_sarima_df, aes(x = Date, y = Residuals)) +
+  geom_line(color = "blue") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Residuals of Combined Holt-Winters and SARIMA Forecast",
+    x = "Date",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+```
